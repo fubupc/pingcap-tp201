@@ -1,25 +1,32 @@
-use std::collections::HashMap;
+use std::{io, path::Path};
+
+use failure::Fail;
 
 /// An in-memory key/value store.
-#[derive(Default)]
-pub struct KvStore {
-    data: HashMap<String, String>,
-}
+pub struct KvStore {}
 
 impl KvStore {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn open<P: AsRef<Path>>(log_file: P) -> Result<KvStore> {
+        unimplemented!()
     }
 
-    pub fn get(&self, k: String) -> Option<String> {
-        self.data.get(&k).cloned()
+    pub fn get(&self, key: String) -> Result<Option<String>> {
+        unimplemented!()
     }
 
-    pub fn set(&mut self, k: String, v: String) -> Option<String> {
-        self.data.insert(k, v)
+    pub fn set(&mut self, key: String, value: String) -> Result<()> {
+        unimplemented!()
     }
 
-    pub fn remove(&mut self, k: String) -> Option<String> {
-        self.data.remove(&k)
+    pub fn remove(&mut self, key: String) -> Result<()> {
+        unimplemented!()
     }
 }
+
+#[derive(Fail, Debug)]
+pub enum Error {
+    #[fail(display = "IO error: {}", _0)]
+    Io(#[cause] io::Error),
+}
+
+pub type Result<T> = ::std::result::Result<T, Error>;
