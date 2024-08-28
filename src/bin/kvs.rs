@@ -1,5 +1,6 @@
 use clap::Parser;
-use std::process::exit;
+use kvs::{Error, KvStore, Result};
+use std::{env::current_dir, process::exit};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about, long_about=None)]
@@ -14,18 +15,31 @@ enum Args {
     Rm { key: String },
 }
 
-fn main() {
+fn main() -> Result<()> {
     let args = Args::parse();
     match args {
-        Args::Get { .. } => {
-            eprintln!("unimplemented!");
+        Args::Get { key } => {
+            let mut store = KvStore::open(current_dir()?)?;
+            match store.get(key.clone())? {
+                Some(v) => println!("{v}"),
+                None => println!("Key not found"),
+            }
         }
-        Args::Set { .. } => {
-            eprintln!("unimplemented!");
+        Args::Set { key, value } => {
+            let mut store = KvStore::open(current_dir()?)?;
+            store.set(key, value)?;
         }
-        Args::Rm { .. } => {
-            eprintln!("unimplemented!");
+        Args::Rm { key } => {
+            let mut store = KvStore::open(current_dir()?)?;
+            match store.remove(key) {
+                Ok(_) => {}
+                Err(Error::KeyNotFound) => {
+                    println!("Key not found");
+                    exit(1);
+                }
+                Err(e) => return Err(e),
+            };
         }
     };
-    exit(1);
+    Ok(())
 }
