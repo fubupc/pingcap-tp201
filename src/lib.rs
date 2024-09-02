@@ -1,8 +1,8 @@
 use std::{
     collections::HashMap,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, BufReader, Seek},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use failure::Fail;
@@ -16,26 +16,45 @@ pub struct KvStore {
     /// In our key/value store, like in bitcask, the index for the entire database is stored in memory.
     in_memory_index: HashMap<String, LogPointer>,
     log: Log,
+    /// How many entries are obsolete caused by subsequent set and rm commands. It's used as heuristic of
+    /// compaction.
+    obsolete_entries: u64,
+    dir: PathBuf,
 }
 
 impl KvStore {
     pub fn open<P: AsRef<Path>>(dir: P) -> Result<KvStore> {
         let mut in_memory_index = HashMap::new();
-        for cmd in Log::replay(dir.as_ref())? {
+        let mut obsolete_entries = 0;
+
+        let current_log = dir.as_ref().join("current.log");
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&current_log)?;
+
+        for cmd in Log::replay(&current_log)? {
             let cmd = cmd?;
             match cmd.0 {
                 Command::Set { key, .. } => {
-                    in_memory_index.insert(key, cmd.1);
+                    if let Some(_) = in_memory_index.insert(key, cmd.1) {
+                        obsolete_entries += 1;
+                    }
                 }
                 Command::Remove { key } => {
-                    in_memory_index.remove(&key);
+                    match in_memory_index.remove(&key) {
+                        Some(_) => obsolete_entries += 1,
+                        None => return Err(Error::KeyNotFound),
+                    };
                 }
             };
         }
 
         Ok(KvStore {
             in_memory_index,
-            log: Log::open(dir.as_ref())?,
+            log: Log::open(&current_log)?,
+            obsolete_entries,
+            dir: dir.as_ref().to_path_buf(),
         })
     }
 
@@ -55,7 +74,12 @@ impl KvStore {
             value: value.clone(),
         };
         let ptr = self.log.append_command(cmd)?;
-        self.in_memory_index.insert(key, ptr);
+        if let Some(_) = self.in_memory_index.insert(key, ptr) {
+            self.obsolete_entries += 1;
+        };
+        if self.should_compact() {
+            self.compact()?;
+        }
         Ok(())
     }
 
@@ -65,6 +89,42 @@ impl KvStore {
             .ok_or(Error::KeyNotFound)?;
         let cmd = Command::Remove { key: key.clone() };
         self.log.append_command(cmd)?;
+        self.obsolete_entries += 1;
+        if self.should_compact() {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn should_compact(&self) -> bool {
+        self.obsolete_entries >= 1000
+    }
+
+    fn compact(&mut self) -> Result<()> {
+        let compact_file = self.dir.join("compact.log");
+        OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(&compact_file)?;
+        let mut compact_log = Log::open(&compact_file)?;
+        let mut compact_index = HashMap::new();
+        for (k, ptr) in &self.in_memory_index {
+            let value = match self.log.read(ptr)? {
+                Command::Set { value, .. } => value,
+                Command::Remove { .. } => return Err(Error::LogFileCorrupted),
+            };
+            let compact_ptr = compact_log.append_command(Command::Set {
+                key: k.clone(),
+                value,
+            })?;
+            compact_index.insert(k.clone(), compact_ptr);
+        }
+        drop(compact_log);
+        let current_file = self.dir.join("current.log");
+        fs::rename(&compact_file, &current_file)?;
+        self.in_memory_index = compact_index;
+        self.log = Log::open(&current_file)?;
+        self.obsolete_entries = 0;
         Ok(())
     }
 }
@@ -89,26 +149,16 @@ pub struct Log {
 pub struct LogPointer(u64);
 
 impl Log {
-    fn open<P: AsRef<Path>>(dir: P) -> Result<Log> {
-        let path = dir.as_ref().join("kvs.log");
+    fn open<P: AsRef<Path>>(file: P) -> Result<Log> {
         Ok(Log {
-            file: OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .open(path)?,
+            file: OpenOptions::new().read(true).write(true).open(file)?,
         })
     }
 
     fn replay<P: AsRef<Path>>(
-        dir: P,
+        file: P,
     ) -> Result<impl Iterator<Item = Result<(Command, LogPointer)>>> {
-        let path = dir.as_ref().join("kvs.log");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(path)?;
+        let file = File::open(file)?;
         Ok(LogReplay::new(BufReader::new(file)))
     }
 
